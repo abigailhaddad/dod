@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+data/*.parquet
+data/seen_articles.json
+data/next_shard.txt
+.playwright-mcp/
+.claude/
+scrape*.log
+.DS_Store

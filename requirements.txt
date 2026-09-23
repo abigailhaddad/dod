@@ -1,0 +1,5 @@
+playwright
+huggingface_hub
+pandas
+pyarrow
+python-dotenv

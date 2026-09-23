@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""
+Scrape DoD daily contract-award announcements from war.gov and publish them
+to HuggingFace as they accumulate, one shard per SHARD_SIZE rows.
+
+war.gov sits behind an Akamai edge that 403s plain HTTP clients -- including
+curl sending full browser headers -- but passes real, non-headless browser
+traffic. So this drives an actual (visible) Chrome window via Playwright
+rather than requests/curl.
+
+Each daily article (e.g. "Contracts for July 7, 2026") is a series of <p>
+tags under div.body: some are bare agency headers ("AIR FORCE", "ARMY", ...),
+the rest are individual contract-award announcements. This scrapes at that
+per-award granularity: one row per award paragraph, tagged with its agency,
+the article's date and URL, and its position in the article.
+
+    python3 scrape.py                     # crawl from most recent, back 2 years
+    python3 scrape.py --days-back 90      # smaller window
+    python3 scrape.py --dry-run           # scrape + shard locally, skip HF upload
+    python3 scrape.py --max-articles 50   # smoke test
+"""
+
+import argparse
+import json
+import random
+import re
+import sys
+import time
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+
+load_dotenv()
+import os
+
+BASE = "https://www.war.gov"
+LIST_URL = f"{BASE}/News/Contracts/"
+REPO_ID = os.environ.get("HF_DATASET_REPO", "abigailhaddad/dod-daily-contracts")
+SHARD_SIZE = 500
+
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = ROOT / "data"
+SEEN_PATH = DATA_DIR / "seen_articles.json"
+SHARD_STATE_PATH = DATA_DIR / "next_shard.txt"
+
+COLUMNS = ["date", "agency", "text", "link", "article_title", "row_index", "scraped_at"]
+
+MONTH_RE = re.compile(r"contracts-for-([a-z]+)-(\d{1,2})-(\d{4})", re.I)
+ARTICLE_ID_RE = re.compile(r"/Article/(\d+)/")
+
+# Legend paragraphs at the end of an article ("*Small business **Mandatory
+# source"), not real awards: one or more `*`-prefixed labels and nothing else.
+FOOTNOTE_RE = re.compile(r"^\s*(\*+\s*[A-Za-z0-9][A-Za-z0-9 ,.()\-]*\s*)+$")
+
+
+def is_footnote(text):
+    return bool(FOOTNOTE_RE.match(text))
+
+
+def polite_sleep(base=1.1, jitter=0.9):
+    time.sleep(base + random.random() * jitter)
+
+
+def parse_date_from_url(url):
+    m = MONTH_RE.search(url)
+    if not m:
+        return None
+    month, day, year = m.groups()
+    # war.gov slugs use full names ("july"), standard abbreviations ("jul"),
+    # and non-standard ones strptime doesn't know ("sept") -- try the raw
+    # token against %B/%b, then its first three letters against %b.
+    for cand in (month, month[:3]):
+        for fmt in ("%B", "%b"):
+            try:
+                return datetime.strptime(f"{cand} {day} {year}", f"{fmt} %d %Y").date()
+            except ValueError:
+                continue
+    return None
+
+
+def load_seen():
+    seen = set()
+    if SEEN_PATH.exists():
+        seen |= set(json.loads(SEEN_PATH.read_text()))
+    # Belt-and-suspenders: derive "already pushed" links directly from local
+    # shard files too, in case a prior run died before its last save_seen().
+    for f in DATA_DIR.glob("shard-*.parquet"):
+        try:
+            seen |= set(pd.read_parquet(f, columns=["link"])["link"].unique())
+        except Exception:
+            pass
+    return seen
+
+
+def save_seen(seen):
+    DATA_DIR.mkdir(exist_ok=True)
+    SEEN_PATH.write_text(json.dumps(sorted(seen)))
+
+
+def load_next_shard():
+    if SHARD_STATE_PATH.exists():
+        return int(SHARD_STATE_PATH.read_text().strip())
+    existing = sorted(DATA_DIR.glob("shard-*.parquet"))
+    if not existing:
+        return 0
+    last = max(int(p.stem.split("-")[1]) for p in existing)
+    return last + 1
+
+
+def save_next_shard(n):
+    DATA_DIR.mkdir(exist_ok=True)
+    SHARD_STATE_PATH.write_text(str(n))
+
+
+def get_listing(page, page_num):
+    url = LIST_URL if page_num == 1 else f"{LIST_URL}?Page={page_num}"
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    links = page.eval_on_selector_all(
+        "main a[href*='/News/Contracts/Contract/Article/']",
+        "els => els.map(e => ({href: e.href, text: e.textContent.trim()}))",
+    )
+    out, seen_href = [], set()
+    for l in links:
+        if l["href"] not in seen_href:
+            seen_href.add(l["href"])
+            out.append(l)
+    return out
+
+
+class ArticleUnavailable(Exception):
+    """war.gov's own CMS module errored rendering this article (seen in the
+    wild: 'ArticleCS - Article View is currently unavailable'). Distinct from
+    a genuinely-empty article so callers can retry instead of treating an
+    empty row list as done."""
+
+
+def scrape_article(page, url, title):
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    body_text = page.evaluate("() => document.body.innerText")
+    if "currently unavailable" in body_text or "an error has occurred" in body_text.lower():
+        raise ArticleUnavailable(url)
+    art_date = parse_date_from_url(url)
+    paras = page.eval_on_selector_all(
+        "div.body > p",
+        """els => els.map(e => {
+            const text = e.textContent.replace(/\\s+/g, ' ').trim();
+            // Agency headers are bold-only paragraphs, but the bold tag
+            // (STRONG vs B) and nesting (sometimes wrapped in a <span>)
+            // vary across the archive -- so find any bold descendant and
+            // check whether its text IS the whole paragraph, rather than
+            // requiring a specific tag/depth.
+            const bold = e.querySelector('strong, b');
+            const boldText = bold ? bold.textContent.replace(/\\s+/g, ' ').trim() : null;
+            return { text, isHeader: !!bold && boldText === text && text.length > 0 };
+        })""",
+    )
+    rows = []
+    agency = None
+    idx = 0
+    now = datetime.now(timezone.utc).isoformat()
+    for p in paras:
+        if p["isHeader"]:
+            agency = p["text"]
+            continue
+        text = p["text"]
+        if not text or is_footnote(text):
+            continue
+        rows.append(
+            {
+                "date": art_date.isoformat() if art_date else None,
+                "agency": agency,
+                "text": text,
+                "link": url,
+                "article_title": title,
+                "row_index": idx,
+                "scraped_at": now,
+            }
+        )
+        idx += 1
+    return rows
+
+
+def push_shard(rows, shard_num, dry_run):
+    DATA_DIR.mkdir(exist_ok=True)
+    df = pd.DataFrame(rows, columns=COLUMNS)
+    shard_path = DATA_DIR / f"shard-{shard_num:05d}.parquet"
+    df.to_parquet(shard_path, index=False)
+    print(f"[shard {shard_num:05d}] wrote {len(df)} rows -> {shard_path}", file=sys.stderr)
+    if dry_run:
+        return
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    api.upload_file(
+        path_or_fileobj=str(shard_path),
+        path_in_repo=f"data/shard-{shard_num:05d}.parquet",
+        repo_id=REPO_ID,
+        repo_type="dataset",
+    )
+    print(f"[shard {shard_num:05d}] pushed to {REPO_ID}", file=sys.stderr)
+
+
+def ensure_repo_and_card(dry_run):
+    if dry_run:
+        return
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    api.create_repo(repo_id=REPO_ID, repo_type="dataset", exist_ok=True)
+    card = CARD_TEMPLATE.format(updated=date.today().isoformat())
+    api.upload_file(
+        path_or_fileobj=card.encode(),
+        path_in_repo="README.md",
+        repo_id=REPO_ID,
+        repo_type="dataset",
+    )
+
+
+CARD_TEMPLATE = """---
+license: other
+license_name: us-govt-public-domain
+language:
+  - en
+tags:
+  - government
+  - defense
+  - procurement
+  - contracts
+pretty_name: DoD Daily Contract Announcements
+size_categories:
+  - 1K<n<10K
+configs:
+  - config_name: default
+    data_files: data/*.parquet
+---
+
+# DoD daily contract announcements
+
+Scraped from [war.gov/News/Contracts](https://www.war.gov/News/Contracts/),
+one row per contract award (not per day).
+
+| column | |
+|---|---|
+| `date` | announcement date (ISO 8601), from the article URL |
+| `agency` | branch/agency header the award was listed under (`ARMY`, `NAVY`, `AIR FORCE`, `DEFENSE LOGISTICS AGENCY`, ...) |
+| `text` | full free-text paragraph for that award, as published |
+| `link` | URL of the source article (one per day, not per award) |
+| `article_title` | title of the source article, e.g. "Contracts for July 7, 2026" |
+| `row_index` | position of this award within its article (0-based) |
+| `scraped_at` | UTC timestamp this row was scraped |
+
+Contractor name, dollar amount, contract number, etc. are inside `text` as
+free text, not parsed into their own columns. Coverage starts from the most
+recent announcements and works backward; not the full archive back to 2014 yet.
+
+U.S. government works are in the public domain. Not an official Department of
+War product.
+
+Last updated: {updated}
+"""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--days-back", type=int, default=730, help="how far back to scrape (default: 2 years)")
+    ap.add_argument("--max-articles", type=int, default=None, help="stop after this many new articles (smoke testing)")
+    ap.add_argument("--dry-run", action="store_true", help="scrape and shard locally, skip HF upload")
+    args = ap.parse_args()
+
+    cutoff = date.today() - timedelta(days=args.days_back)
+    seen = load_seen()
+    shard_num = load_next_shard()
+    buffer = []
+    new_count = 0
+
+    ensure_repo_and_card(args.dry_run)
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=False)
+        page = browser.new_page()
+
+        page_num = 1
+        stop = False
+        while not stop:
+            arts = get_listing(page, page_num)
+            if not arts:
+                print(f"[list] page {page_num}: no items, stopping", file=sys.stderr)
+                break
+            print(f"[list] page {page_num}: {len(arts)} articles", file=sys.stderr)
+
+            for a in arts:
+                d = parse_date_from_url(a["href"])
+                if d and d < cutoff:
+                    print(f"[list] hit cutoff date {cutoff} at {a['href']}", file=sys.stderr)
+                    stop = True
+                    break
+                if a["href"] in seen:
+                    continue
+
+                polite_sleep()
+                try:
+                    rows = scrape_article(page, a["href"], a["text"])
+                except Exception as e:
+                    print(f"[article] FAILED {a['href']}: {e}", file=sys.stderr)
+                    continue
+
+                buffer.extend(rows)
+                seen.add(a["href"])
+                new_count += 1
+                print(f"[article] {a['href']} -> {len(rows)} rows (buffer={len(buffer)})", file=sys.stderr)
+                save_seen(seen)  # cheap; keeps a crash from re-scraping already-seen articles
+
+                if len(buffer) >= SHARD_SIZE:
+                    push_shard(buffer, shard_num, args.dry_run)
+                    shard_num += 1
+                    save_next_shard(shard_num)
+                    buffer = []
+
+                if args.max_articles and new_count >= args.max_articles:
+                    stop = True
+                    break
+
+            save_seen(seen)
+            page_num += 1
+            polite_sleep()
+
+        browser.close()
+
+    if buffer:
+        push_shard(buffer, shard_num, args.dry_run)
+        shard_num += 1
+        save_next_shard(shard_num)
+        save_seen(seen)
+
+    print(f"Done. {new_count} new articles scraped this run.", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
