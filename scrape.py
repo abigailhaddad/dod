@@ -377,7 +377,7 @@ tags:
   - contracts
 pretty_name: DoD Daily Contract Announcements
 size_categories:
-  - 1K<n<10K
+  - 10K<n<100K
 configs:
   - config_name: default
     data_files: data/*.parquet
@@ -399,8 +399,10 @@ one row per contract award (not per day).
 | `scraped_at` | UTC timestamp this row was scraped |
 
 Contractor name, dollar amount, contract number, etc. are inside `text` as
-free text, not parsed into their own columns. Coverage starts from the most
-recent announcements and works backward; not the full archive back to 2014 yet.
+free text, not parsed into their own columns. Covers the full archive,
+July 2014 through present -- a handful of individual days (fewer than ten,
+out of ~3,000) are missing where war.gov's own server errors on that
+article or has taken it down entirely.
 
 U.S. government works are in the public domain. Not an official Department of
 War product.
