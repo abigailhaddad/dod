@@ -183,34 +183,122 @@ def scrape_article(page, url, title, known_agencies):
     if "currently unavailable" in body_text or "an error has occurred" in body_text.lower():
         raise ArticleUnavailable(url)
     art_date = parse_date_from_url(url)
-    paras = page.eval_on_selector_all(
-        "div.body p",
-        """els => els.map(e => {
-            const text = e.textContent.replace(/\\s+/g, ' ').trim();
-            // Agency headers are bold-only paragraphs, but the bold tag
-            // (STRONG vs B), nesting (sometimes wrapped in a <span>), and
-            // count (some paragraphs split the header across two adjacent
-            // <strong> tags, e.g. an empty '<strong>&nbsp;</strong>' before
-            // '<strong>NAVY</strong>') vary across the archive -- so collect
-            // ALL bold descendants and check whether their combined text IS
-            // the whole paragraph, rather than requiring one specific tag.
-            const bolds = Array.from(e.querySelectorAll('strong, b'));
-            const boldText = bolds
-                .map(b => b.textContent.replace(/\\s+/g, ' ').trim())
-                .filter(Boolean)
-                .join(' ');
-            // A handful of articles open with an italic editorial note
-            // ("Contracts for March 28, 2024 (corrected)") before any
-            // agency section -- not an award, so drop it the same way.
-            const em = e.querySelector('em, i');
-            const emText = em ? em.textContent.replace(/\\s+/g, ' ').trim() : null;
-            return {
-                text,
-                isHeader: bolds.length > 0 && boldText === text && text.length > 0,
-                isNote: !!em && emText === text && text.length > 0,
-            };
-        })""",
+    paras = page.evaluate(
+        """() => {
+            // Paragraph markup drifts across the archive: modern articles
+            // wrap every award in its own <p>; some 2019-era articles wrap
+            // each award in a <div> instead, or wrap only the headers in a
+            // <div> and leave the award text as bare text nodes separated
+            // by <br> with no wrapping element at all; some 2017-era
+            // articles (raw Word-paste HTML, complete with MSO conditional
+            // comments and <style> blocks) wrap the ENTIRE article body in
+            // one extra <div>, itself containing normal <p> tags. A single
+            // fixed selector can't cover all of that, so this walks
+            // div.body's child nodes and reconstructs blocks by splitting
+            // on <br>, on <p> boundaries (always a leaf block), and on
+            // <div> boundaries -- but a <div> is only treated as a leaf
+            // block if it has no nested <p>/<div> of its own; if it does,
+            // it's a transparent wrapper and gets walked the same way as
+            // div.body itself. <style>/<script> content and comments are
+            // skipped outright so raw CSS/JS source never leaks in as text.
+            const body = document.querySelector('div.body');
+            if (!body) return [];
+
+            function collectInline(node) {
+                // Recursively flattens an element's text plus whatever of
+                // it is nested under strong/b (bold) or em/i (italic).
+                let text = '', bold = '', em = '';
+                for (const child of node.childNodes) {
+                    if (child.nodeType === Node.TEXT_NODE) {
+                        text += child.textContent;
+                    } else if (child.nodeType !== 1) {
+                        continue; // comments, etc.
+                    } else if (child.tagName === 'STYLE' || child.tagName === 'SCRIPT') {
+                        continue;
+                    } else if (child.tagName === 'BR') {
+                        text += ' ';
+                    } else {
+                        const sub = collectInline(child);
+                        text += sub.text;
+                        bold += (child.tagName === 'STRONG' || child.tagName === 'B') ? sub.text : sub.bold;
+                        em += (child.tagName === 'EM' || child.tagName === 'I') ? sub.text : sub.em;
+                    }
+                }
+                return {text, bold, em};
+            }
+
+            function asBlock(node) {
+                const r = collectInline(node);
+                const text = r.text.replace(/\\s+/g, ' ').trim();
+                if (!text) return null;
+                return {
+                    text,
+                    boldText: r.bold.replace(/\\s+/g, ' ').trim(),
+                    emText: r.em.replace(/\\s+/g, ' ').trim(),
+                };
+            }
+
+            const blocks = [];
+
+            function walk(container) {
+                let bufText = '', bufBold = '', bufEm = '';
+                function pushBuf() {
+                    const t = bufText.replace(/\\s+/g, ' ').trim();
+                    if (t) blocks.push({
+                        text: t,
+                        boldText: bufBold.replace(/\\s+/g, ' ').trim(),
+                        emText: bufEm.replace(/\\s+/g, ' ').trim(),
+                    });
+                    bufText = ''; bufBold = ''; bufEm = '';
+                }
+
+                for (const node of container.childNodes) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        bufText += node.textContent;
+                    } else if (node.nodeType !== 1) {
+                        continue; // comments, etc.
+                    } else if (node.tagName === 'STYLE' || node.tagName === 'SCRIPT') {
+                        continue;
+                    } else if (node.tagName === 'BR') {
+                        pushBuf();
+                    } else if (node.tagName === 'P') {
+                        pushBuf();
+                        const b = asBlock(node);
+                        if (b) blocks.push(b);
+                    } else if (node.tagName === 'DIV') {
+                        pushBuf();
+                        if (node.querySelector('p, div')) {
+                            walk(node); // transparent wrapper
+                        } else {
+                            const b = asBlock(node);
+                            if (b) blocks.push(b);
+                        }
+                    } else {
+                        const r = collectInline(node);
+                        bufText += r.text;
+                        bufBold += (node.tagName === 'STRONG' || node.tagName === 'B') ? r.text : r.bold;
+                        bufEm += (node.tagName === 'EM' || node.tagName === 'I') ? r.text : r.em;
+                    }
+                }
+                pushBuf();
+            }
+
+            walk(body);
+
+            return blocks.map(b => ({
+                text: b.text,
+                isHeader: b.boldText.length > 0 && b.boldText === b.text,
+                isNote: b.emText.length > 0 && b.emText === b.text,
+            }));
+        }"""
     )
+    if not paras:
+        # Nothing under div.body at all -- almost certainly a fetch that
+        # raced the page still rendering, not a genuinely contentless
+        # article (every real article has at least one paragraph). Treat
+        # as a failure so the caller retries it instead of silently
+        # recording 0 rows and marking it done forever.
+        raise RuntimeError(f"no paragraphs found in div.body for {url}")
     rows = []
     agency = None
     idx = 0
