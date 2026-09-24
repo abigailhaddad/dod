@@ -16,6 +16,7 @@
         .dataTables_wrapper .row > div { padding: 0; }
         #contractsTable td.award-text { max-width: 520px; white-space: normal; }
         #contractsTable td.award-agency { white-space: nowrap; }
+        #extractionNote { margin: 0 0 0.75rem; }
     </style>
 </head>
 <body>
@@ -48,14 +49,20 @@
             <div class="panel" id="volumeByYear"></div>
         </div>
 
+        <p class="text-muted small" id="extractionNote">
+            Company and Place are pulled from the start of the award text automatically, not scraped
+            fact &mdash; about 95% match, blank rather than a guess otherwise. When an award lists
+            several companies, only the first one is captured.
+        </p>
+
         <div class="table-scroll-wrapper">
             <table id="contractsTable" class="table" style="width:100%">
                 <thead>
                     <tr>
                         <th>Date</th>
                         <th>Agency</th>
-                        <th>Company</th>
-                        <th>Place</th>
+                        <th title="Best-effort extraction from the award text, not scraped fact">Company</th>
+                        <th title="Best-effort extraction from the award text, not scraped fact">Place</th>
                         <th>Award</th>
                         <th>Source</th>
                     </tr>
