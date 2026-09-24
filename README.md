@@ -29,3 +29,20 @@ python3 scrape.py --max-articles 5 --dry-run
 
 Resumable (`data/seen_articles.json`, `data/next_shard.txt`); pushes to HF in
 shards of 500 rows as it goes.
+
+## Website
+
+[dod-daily-contracts.doj-voting-section.workers.dev](https://dod-daily-contracts.doj-voting-section.workers.dev)
+-- a searchable/filterable table (agency, year, full-text search) built the
+same way as `hhs-dab` and `usajobs_historical`: one Parquet file, no backend,
+queried client-side via DuckDB-WASM.
+
+```bash
+python3 build_web_data.py   # flattens the HF dataset into web/data/contracts.parquet
+npx wrangler deploy         # redeploy after rebuilding
+```
+
+`build_web_data.py` also normalizes the `agency` column for the filter
+dropdown (the raw column carries 12 years of hand-typed variants --
+"MISSLE", "DEFNSE", "LOGISITICS" -- collapsed to ~28 canonical labels); the
+published dataset itself is untouched.

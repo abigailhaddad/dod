@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dod-daily-contracts",
+  "compatibility_date": "2026-09-24",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "web"
+  }
+}

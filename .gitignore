@@ -10,3 +10,6 @@ data/known_agencies.json
 .claude/
 scrape*.log
 .DS_Store
+web/data/*.parquet
+node_modules/
+.wrangler/
