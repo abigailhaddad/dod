@@ -5,7 +5,11 @@
   "observability": {
     "enabled": true
   },
+  "workers_dev": true,
   "assets": {
     "directory": "web"
-  }
+  },
+  "routes": [
+    { "pattern": "dod-daily-contracts.abigailhaddad.com", "custom_domain": true }
+  ]
 }

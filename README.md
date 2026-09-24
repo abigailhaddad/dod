@@ -36,10 +36,10 @@ shards of 500 rows as it goes.
 
 ## Website
 
-[dod-daily-contracts.doj-voting-section.workers.dev](https://dod-daily-contracts.doj-voting-section.workers.dev)
--- a searchable/filterable table (agency, year, full-text search) built the
-same way as `hhs-dab` and `usajobs_historical`: one Parquet file, no backend,
-queried client-side via DuckDB-WASM.
+[dod-daily-contracts.abigailhaddad.com](https://dod-daily-contracts.abigailhaddad.com)
+-- a searchable/filterable table (agency, company, place, year, full-text
+search) built the same way as `hhs-dab` and `usajobs_historical`: one
+Parquet file, no backend, queried client-side via DuckDB-WASM.
 
 ```bash
 python3 build_web_data.py   # flattens the HF dataset into web/data/contracts.parquet
