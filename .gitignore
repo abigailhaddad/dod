@@ -5,6 +5,7 @@ __pycache__/
 data/*.parquet
 data/seen_articles.json
 data/next_shard.txt
+data/known_agencies.json
 .playwright-mcp/
 .claude/
 scrape*.log

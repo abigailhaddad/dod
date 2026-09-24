@@ -60,6 +60,46 @@ def is_footnote(text):
     return bool(FOOTNOTE_RE.match(text))
 
 
+# A minority of paragraphs across the archive carry the agency name as plain
+# centered text with no bold/italic markup at all ("<p style="text-align:
+# center;">DEFENSE LOGISTICS AGENCY</p>"), so there's no DOM signal to catch
+# them by. Instead, treat any short, digit-free, dollar-free paragraph whose
+# text matches a name we already know is an agency as a header too. Seeded
+# with the standard branches/agencies so a fresh run doesn't depend on
+# stumbling on a properly-formatted instance first; grows as bold-formatted
+# headers are found during the scrape.
+KNOWN_AGENCIES_PATH = DATA_DIR / "known_agencies.json"
+SEED_AGENCIES = {
+    "ARMY", "NAVY", "AIR FORCE", "MARINE CORPS", "SPACE FORCE", "COAST GUARD",
+    "DEFENSE LOGISTICS AGENCY", "MISSILE DEFENSE AGENCY", "DEFENSE HEALTH AGENCY",
+    "U.S. SPECIAL OPERATIONS COMMAND", "U.S. TRANSPORTATION COMMAND",
+    "UNITED STATES TRANSPORTATION COMMAND", "WASHINGTON HEADQUARTERS SERVICES",
+    "DEFENSE ADVANCED RESEARCH PROJECTS AGENCY", "DEFENSE FINANCE AND ACCOUNTING SERVICE",
+    "DEFENSE COUNTERINTELLIGENCE AND SECURITY AGENCY", "DEFENSE INFORMATION SYSTEMS AGENCY",
+    "DEFENSE THREAT REDUCTION AGENCY", "DEFENSE MICROELECTRONICS ACTIVITY",
+    "CHIEF DIGITAL AND ARTIFICIAL INTELLIGENCE OFFICE", "DEFENSE HUMAN RESOURCES ACTIVITY",
+    "DEPARTMENT OF WAR EDUCATION ACTIVITY", "DEPARTMENT OF DEFENSE EDUCATION ACTIVITY",
+    "DEFENSE CONTRACT MANAGEMENT AGENCY", "NATIONAL GEOSPATIAL-INTELLIGENCE AGENCY",
+    "NATIONAL SECURITY AGENCY", "DEFENSE COMMISSARY AGENCY",
+    "DEFENSE POW/MIA ACCOUNTING AGENCY", "UNIFORMED SERVICES UNIVERSITY",
+}
+
+
+def load_known_agencies():
+    if KNOWN_AGENCIES_PATH.exists():
+        return set(json.loads(KNOWN_AGENCIES_PATH.read_text())) | SEED_AGENCIES
+    return set(SEED_AGENCIES)
+
+
+def save_known_agencies(agencies):
+    DATA_DIR.mkdir(exist_ok=True)
+    KNOWN_AGENCIES_PATH.write_text(json.dumps(sorted(agencies)))
+
+
+def looks_like_bare_header(text):
+    return bool(text) and len(text) <= 70 and "$" not in text and not re.search(r"\d", text)
+
+
 def polite_sleep(base=1.1, jitter=0.9):
     time.sleep(base + random.random() * jitter)
 
@@ -137,24 +177,38 @@ class ArticleUnavailable(Exception):
     empty row list as done."""
 
 
-def scrape_article(page, url, title):
+def scrape_article(page, url, title, known_agencies):
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     body_text = page.evaluate("() => document.body.innerText")
     if "currently unavailable" in body_text or "an error has occurred" in body_text.lower():
         raise ArticleUnavailable(url)
     art_date = parse_date_from_url(url)
     paras = page.eval_on_selector_all(
-        "div.body > p",
+        "div.body p",
         """els => els.map(e => {
             const text = e.textContent.replace(/\\s+/g, ' ').trim();
             // Agency headers are bold-only paragraphs, but the bold tag
-            // (STRONG vs B) and nesting (sometimes wrapped in a <span>)
-            // vary across the archive -- so find any bold descendant and
-            // check whether its text IS the whole paragraph, rather than
-            // requiring a specific tag/depth.
-            const bold = e.querySelector('strong, b');
-            const boldText = bold ? bold.textContent.replace(/\\s+/g, ' ').trim() : null;
-            return { text, isHeader: !!bold && boldText === text && text.length > 0 };
+            // (STRONG vs B), nesting (sometimes wrapped in a <span>), and
+            // count (some paragraphs split the header across two adjacent
+            // <strong> tags, e.g. an empty '<strong>&nbsp;</strong>' before
+            // '<strong>NAVY</strong>') vary across the archive -- so collect
+            // ALL bold descendants and check whether their combined text IS
+            // the whole paragraph, rather than requiring one specific tag.
+            const bolds = Array.from(e.querySelectorAll('strong, b'));
+            const boldText = bolds
+                .map(b => b.textContent.replace(/\\s+/g, ' ').trim())
+                .filter(Boolean)
+                .join(' ');
+            // A handful of articles open with an italic editorial note
+            // ("Contracts for March 28, 2024 (corrected)") before any
+            // agency section -- not an award, so drop it the same way.
+            const em = e.querySelector('em, i');
+            const emText = em ? em.textContent.replace(/\\s+/g, ' ').trim() : null;
+            return {
+                text,
+                isHeader: bolds.length > 0 && boldText === text && text.length > 0,
+                isNote: !!em && emText === text && text.length > 0,
+            };
         })""",
     )
     rows = []
@@ -162,11 +216,15 @@ def scrape_article(page, url, title):
     idx = 0
     now = datetime.now(timezone.utc).isoformat()
     for p in paras:
-        if p["isHeader"]:
-            agency = p["text"]
-            continue
         text = p["text"]
-        if not text or is_footnote(text):
+        if p["isHeader"]:
+            agency = text
+            known_agencies.add(text.strip().upper())
+            continue
+        if looks_like_bare_header(text) and text.strip().upper() in known_agencies:
+            agency = text
+            continue
+        if not text or p["isNote"] or is_footnote(text):
             continue
         rows.append(
             {
@@ -272,6 +330,7 @@ def main():
 
     cutoff = date.today() - timedelta(days=args.days_back)
     seen = load_seen()
+    known_agencies = load_known_agencies()
     shard_num = load_next_shard()
     buffer = []
     new_count = 0
@@ -285,7 +344,16 @@ def main():
         page_num = 1
         stop = False
         while not stop:
-            arts = get_listing(page, page_num)
+            for attempt in range(5):
+                try:
+                    arts = get_listing(page, page_num)
+                    break
+                except Exception as e:
+                    print(f"[list] page {page_num} FAILED (attempt {attempt + 1}/5): {e}", file=sys.stderr)
+                    time.sleep(10)
+            else:
+                print(f"[list] page {page_num}: giving up after 5 attempts, stopping", file=sys.stderr)
+                break
             if not arts:
                 print(f"[list] page {page_num}: no items, stopping", file=sys.stderr)
                 break
@@ -302,7 +370,7 @@ def main():
 
                 polite_sleep()
                 try:
-                    rows = scrape_article(page, a["href"], a["text"])
+                    rows = scrape_article(page, a["href"], a["text"], known_agencies)
                 except Exception as e:
                     print(f"[article] FAILED {a['href']}: {e}", file=sys.stderr)
                     continue
@@ -312,6 +380,7 @@ def main():
                 new_count += 1
                 print(f"[article] {a['href']} -> {len(rows)} rows (buffer={len(buffer)})", file=sys.stderr)
                 save_seen(seen)  # cheap; keeps a crash from re-scraping already-seen articles
+                save_known_agencies(known_agencies)
 
                 if len(buffer) >= SHARD_SIZE:
                     push_shard(buffer, shard_num, args.dry_run)
