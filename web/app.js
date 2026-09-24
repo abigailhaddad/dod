@@ -12,54 +12,100 @@ const COLUMNS = [
   { label: 'Award', field: 'text', filterType: 'text', index: 2 },
 ];
 
+// Hidden, filter-only columns -- not rendered as <th>s, just along for the
+// ride in each row's data array so the aggregate panels below can group by
+// them without a second query.
+const YEAR_INDEX = 4;
+const LINK_INDEX = 5;
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
 
+// The stat cards and the two panels all describe "the rows currently on
+// screen", not "the whole dataset" -- so they're recomputed from the
+// DataTable's own filtered row set (rows({search:'applied'}), the same API
+// the table itself draws from) every time a filter changes, rather than
+// queried from DuckDB once at load. That keeps them consistent with the
+// table by construction: whatever the table is showing IS the aggregate.
+function computeAggregates(table) {
+  const rows = table.rows({ search: 'applied' }).data().toArray();
+  const agencyCounts = new Map();
+  const yearCounts = new Map();
+  const days = new Set();
+  let minDate = null;
+  let maxDate = null;
+  for (const r of rows) {
+    const [date, agency, , , year, link] = r;
+    if (date) {
+      if (!minDate || date < minDate) minDate = date;
+      if (!maxDate || date > maxDate) maxDate = date;
+    }
+    if (agency) agencyCounts.set(agency, (agencyCounts.get(agency) || 0) + 1);
+    if (year) yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
+    if (link) days.add(link);
+  }
+  return { total: rows.length, agencyCounts, yearCounts, days, minDate, maxDate };
+}
+
+function renderStats(agg) {
+  document.getElementById('statTotal').textContent = agg.total.toLocaleString();
+  document.getElementById('statAgencies').textContent = agg.agencyCounts.size;
+  document.getElementById('statDays').textContent = agg.days.size.toLocaleString();
+  document.getElementById('statDateRange').textContent =
+    agg.minDate && agg.maxDate ? `${agg.minDate} – ${agg.maxDate}` : '–';
+}
+
+function renderTopAgencies(agg) {
+  const el = document.getElementById('topAgencies');
+  if (!el) return;
+  const top = Array.from(agg.agencyCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (!top.length) {
+    el.innerHTML = '<h3>Top agencies</h3><p class="text-muted small">No matching awards.</p>';
+    return;
+  }
+  el.innerHTML = `
+    <h3>Top agencies</h3>
+    <ul class="outcome-list">
+      ${top.map(([agency, n]) => `<li><span class="outcome-label">${escapeHtml(agency)}</span>
+        <span class="outcome-count">${n.toLocaleString()}</span></li>`).join('')}
+    </ul>
+  `;
+}
+
 // Same lightweight "no chart library" bar as hhs-dab's volume-by-year panel
 // -- div heights scaled to the tallest year, nothing this static site
 // doesn't already have.
-async function renderVolumeByYear(conn, t) {
+function renderVolumeByYear(agg) {
   const el = document.getElementById('volumeByYear');
   if (!el) return;
-  const rows = await query(conn, `
-    SELECT year, COUNT(*) AS n FROM ${t}
-    WHERE year IS NOT NULL GROUP BY year ORDER BY year
-  `);
-  if (!rows.length) return;
-  const max = Math.max(...rows.map((r) => Number(r.n)));
+  const years = Array.from(agg.yearCounts.entries()).sort((a, b) => a[0] - b[0]);
+  if (!years.length) {
+    el.innerHTML = '<h3>Awards by year</h3><p class="text-muted small">No matching awards.</p>';
+    return;
+  }
+  const max = Math.max(...years.map(([, n]) => n));
   el.innerHTML = `
     <h3>Awards by year</h3>
     <div class="year-bars">
-      ${rows.map((r) => {
-        const n = Number(r.n);
+      ${years.map(([year, n]) => {
         const pct = Math.max(2, Math.round((n / max) * 100));
-        return `<div class="year-bar" title="${r.year}: ${n.toLocaleString()}">
+        return `<div class="year-bar" title="${year}: ${n.toLocaleString()}">
           <div class="year-bar-fill" style="height:${pct}%"></div>
-          <div class="year-bar-label">${String(r.year).slice(2)}</div>
+          <div class="year-bar-label">${String(year).slice(2)}</div>
         </div>`;
       }).join('')}
     </div>
   `;
 }
 
-async function renderTopAgencies(conn, t) {
-  const el = document.getElementById('topAgencies');
-  if (!el) return;
-  const rows = await query(conn, `
-    SELECT agency, COUNT(*) AS n FROM ${t}
-    WHERE agency IS NOT NULL GROUP BY agency ORDER BY n DESC LIMIT 8
-  `);
-  if (!rows.length) return;
-  el.innerHTML = `
-    <h3>Top agencies</h3>
-    <ul class="outcome-list">
-      ${rows.map((r) => `<li><span class="outcome-label">${escapeHtml(r.agency)}</span>
-        <span class="outcome-count">${Number(r.n).toLocaleString()}</span></li>`).join('')}
-    </ul>
-  `;
+function renderAggregates(table) {
+  const agg = computeAggregates(table);
+  renderStats(agg);
+  renderTopAgencies(agg);
+  renderVolumeByYear(agg);
 }
 
 async function main() {
@@ -79,27 +125,10 @@ async function main() {
     r.link
       ? `<a href="${escapeHtml(r.link)}" target="_blank" rel="noopener" title="${escapeHtml(r.article_title || '')}">Source &#8599;</a>`
       : '',
-    r.year, // hidden, filter-only
+    r.year,
+    r.link || '',
   ]);
 
-  const [stats] = await query(conn, `
-    SELECT COUNT(*) AS total,
-           COUNT(DISTINCT agency) AS agencies,
-           COUNT(DISTINCT link) AS days,
-           CAST(MIN(date) AS VARCHAR) AS min_date,
-           CAST(MAX(date) AS VARCHAR) AS max_date
-    FROM ${t}
-  `);
-  document.getElementById('statTotal').textContent = Number(stats.total).toLocaleString();
-  document.getElementById('statAgencies').textContent = stats.agencies;
-  document.getElementById('statDays').textContent = Number(stats.days).toLocaleString();
-  document.getElementById('statDateRange').textContent =
-    stats.min_date && stats.max_date ? `${stats.min_date} – ${stats.max_date}` : '–';
-
-  await renderTopAgencies(conn, t);
-  await renderVolumeByYear(conn, t);
-
-  const YEAR_INDEX = 4;
   const allColumns = [
     ...COLUMNS,
     { label: 'Year', field: 'year', filterType: 'multiselect', index: YEAR_INDEX },
@@ -116,6 +145,7 @@ async function main() {
         { data: 2, className: 'award-text' },
         { data: 3, orderable: false },
         { data: 4, visible: false },
+        { data: 5, visible: false },
       ],
       order: [[0, 'desc']],
       pageLength: 25,
@@ -130,7 +160,9 @@ async function main() {
       { header: 'Source', getData: (n, d) => $('<div>').html(d[3]).text() },
     ],
   });
-  void table;
+
+  renderAggregates(table);
+  table.on('draw', () => renderAggregates(table));
 }
 
 main().catch((err) => {
