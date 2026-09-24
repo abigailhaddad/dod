@@ -44,7 +44,6 @@ SHARD_SIZE = 500
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 SEEN_PATH = DATA_DIR / "seen_articles.json"
-SHARD_STATE_PATH = DATA_DIR / "next_shard.txt"
 
 COLUMNS = ["date", "agency", "text", "link", "article_title", "row_index", "scraped_at"]
 
@@ -121,6 +120,19 @@ def parse_date_from_url(url):
     return None
 
 
+def _hf_shard_files():
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    try:
+        return sorted(
+            f for f in api.list_repo_files(REPO_ID, repo_type="dataset")
+            if f.startswith("data/shard-")
+        )
+    except Exception:
+        return []
+
+
 def load_seen():
     seen = set()
     if SEEN_PATH.exists():
@@ -132,6 +144,21 @@ def load_seen():
             seen |= set(pd.read_parquet(f, columns=["link"])["link"].unique())
         except Exception:
             pass
+    # A fresh checkout (CI: data/ isn't committed) has no local state at all
+    # -- fall back to the published dataset itself so a cron run there
+    # doesn't treat everything as new and push duplicate shards.
+    if not seen:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def read_links(f):
+            try:
+                return set(pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}", columns=["link"])["link"].unique())
+            except Exception:
+                return set()
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for s in pool.map(read_links, _hf_shard_files()):
+                seen |= s
     return seen
 
 
@@ -140,19 +167,25 @@ def save_seen(seen):
     SEEN_PATH.write_text(json.dumps(sorted(seen)))
 
 
-def load_next_shard():
-    if SHARD_STATE_PATH.exists():
-        return int(SHARD_STATE_PATH.read_text().strip())
-    existing = sorted(DATA_DIR.glob("shard-*.parquet"))
-    if not existing:
-        return 0
-    last = max(int(p.stem.split("-")[1]) for p in existing)
-    return last + 1
-
-
-def save_next_shard(n):
-    DATA_DIR.mkdir(exist_ok=True)
-    SHARD_STATE_PATH.write_text(str(n))
+def load_resume_state():
+    """(shard_num, buffer) to start from -- continuing the last shard if it's
+    still under SHARD_SIZE rather than minting a near-empty file for it, so a
+    low-volume day doesn't fragment the dataset into hundreds of tiny shards.
+    Checks local shard files first (the normal case on a machine that already
+    has data/), then falls back to the published dataset (CI's fresh checkout)."""
+    local = sorted(DATA_DIR.glob("shard-*.parquet"))
+    if local:
+        last_num = int(local[-1].stem.split("-")[1])
+        df = pd.read_parquet(local[-1])
+    else:
+        hf_shards = _hf_shard_files()
+        if not hf_shards:
+            return 0, []
+        last_num = int(Path(hf_shards[-1]).stem.split("-")[1])
+        df = pd.read_parquet(f"hf://datasets/{REPO_ID}/{hf_shards[-1]}")
+    if len(df) < SHARD_SIZE:
+        return last_num, df[COLUMNS].to_dict("records")
+    return last_num + 1, []
 
 
 def get_listing(page, page_num):
@@ -429,8 +462,7 @@ def main():
     cutoff = date.today() - timedelta(days=args.days_back)
     seen = load_seen()
     known_agencies = load_known_agencies()
-    shard_num = load_next_shard()
-    buffer = []
+    shard_num, buffer = load_resume_state()
     new_count = 0
 
     ensure_repo_and_card(args.dry_run)
@@ -483,7 +515,6 @@ def main():
                 if len(buffer) >= SHARD_SIZE:
                     push_shard(buffer, shard_num, args.dry_run)
                     shard_num += 1
-                    save_next_shard(shard_num)
                     buffer = []
 
                 if args.max_articles and new_count >= args.max_articles:
@@ -496,10 +527,8 @@ def main():
 
         browser.close()
 
-    if buffer:
+    if buffer and new_count:
         push_shard(buffer, shard_num, args.dry_run)
-        shard_num += 1
-        save_next_shard(shard_num)
         save_seen(seen)
 
     print(f"Done. {new_count} new articles scraped this run.", file=sys.stderr)

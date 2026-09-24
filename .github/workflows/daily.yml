@@ -1,0 +1,56 @@
+name: Daily scrape and deploy
+
+on:
+  schedule:
+    - cron: "0 21 * * *"  # ~4-5pm ET, after war.gov's daily posting
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  scrape-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright chromium + system deps
+        run: playwright install --with-deps chromium
+
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      # war.gov 403s headless clients but allows real browser traffic (see
+      # scrape.py's header comment) -- headless=False needs a display even
+      # in CI, hence xvfb. Small window: this is a daily incremental catch-up,
+      # not the 2-year backfill (scrape.py's default).
+      - name: Scrape new contracts
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: xvfb-run -a python3 scrape.py --days-back 10
+
+      - name: Add company/place to any new shards
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python3 enrich_company_place.py
+
+      - name: Rebuild site data
+        run: python3 build_web_data.py
+
+      - name: Deploy to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: d35a64188257cbb8177a48e907e28171
+        run: npx wrangler deploy
