@@ -9,13 +9,15 @@ const PARQUET_URL = 'data/contracts.parquet';
 
 const COLUMNS = [
   { label: 'Agency', field: 'agency', filterType: 'multiselect', index: 1 },
-  { label: 'Award', field: 'text', filterType: 'text', index: 2 },
+  { label: 'Company', field: 'company', filterType: 'text', index: 2 },
+  { label: 'Place', field: 'place', filterType: 'text', index: 3 },
+  { label: 'Award', field: 'text', filterType: 'text', index: 4 },
 ];
 
 // Hidden, filter-only column -- not rendered as a <th>, just along for the
 // ride in each row's data array so the panels below can group by year
 // without a second query.
-const YEAR_INDEX = 4;
+const YEAR_INDEX = 6;
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -39,7 +41,8 @@ function computeAggregates(table) {
   const agencyCounts = new Map();
   const yearCounts = new Map();
   for (const r of rows) {
-    const [, agency, , , year] = r;
+    const agency = r[1];
+    const year = r[YEAR_INDEX];
     if (agency) agencyCounts.set(agency, (agencyCounts.get(agency) || 0) + 1);
     if (year) yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
   }
@@ -106,7 +109,7 @@ async function main() {
   const t = tableRef(conn);
 
   const rows = await query(conn, `
-    SELECT id, CAST(date AS VARCHAR) AS date, year, agency, text, link, article_title
+    SELECT id, CAST(date AS VARCHAR) AS date, year, agency, company, place, text, link, article_title
     FROM ${t}
     ORDER BY date DESC NULLS LAST, id
   `);
@@ -114,6 +117,8 @@ async function main() {
   const tableData = rows.map((r) => [
     r.date || '',
     r.agency || '',
+    r.company || '',
+    r.place || '',
     escapeHtml(r.text),
     r.link
       ? `<a href="${escapeHtml(r.link)}" target="_blank" rel="noopener" title="${escapeHtml(r.article_title || '')}">Source &#8599;</a>`
@@ -148,9 +153,11 @@ async function main() {
       columns: [
         { data: 0 },
         { data: 1, className: 'award-agency' },
-        { data: 2, className: 'award-text' },
-        { data: 3, orderable: false },
-        { data: 4, visible: false },
+        { data: 2, className: 'award-agency' },
+        { data: 3, className: 'award-agency' },
+        { data: 4, className: 'award-text' },
+        { data: 5, orderable: false },
+        { data: 6, visible: false },
       ],
       order: [[0, 'desc']],
       pageLength: 25,
@@ -161,8 +168,10 @@ async function main() {
     csvColumns: [
       { header: 'Date', getData: (n, d) => d[0] },
       { header: 'Agency', getData: (n, d) => d[1] },
-      { header: 'Award', getData: (n, d) => $('<div>').html(d[2]).text() },
-      { header: 'Source', getData: (n, d) => $('<div>').html(d[3]).text() },
+      { header: 'Company', getData: (n, d) => d[2] },
+      { header: 'Place', getData: (n, d) => d[3] },
+      { header: 'Award', getData: (n, d) => $('<div>').html(d[4]).text() },
+      { header: 'Source', getData: (n, d) => $('<div>').html(d[5]).text() },
     ],
   });
 
