@@ -91,6 +91,8 @@ def normalize_agency(a):
 
 
 def main():
+    from concurrent.futures import ThreadPoolExecutor
+
     from huggingface_hub import HfApi
 
     print(f"Loading {REPO_ID} from HuggingFace...", file=sys.stderr)
@@ -99,7 +101,13 @@ def main():
         f for f in api.list_repo_files(REPO_ID, repo_type="dataset")
         if f.startswith("data/shard-")
     )
-    dfs = [pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}") for f in shard_files]
+    # One HTTP round-trip per shard, network-bound not CPU-bound, so a
+    # thread pool helps despite the GIL -- reading 86 shards sequentially
+    # took ~48s locally; this is the whole reason build_web_data.py is slow.
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        dfs = list(pool.map(
+            lambda f: pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}"), shard_files
+        ))
     df = pd.concat(dfs, ignore_index=True)
     print(f"{len(df):,} rows loaded from {len(shard_files)} shards", file=sys.stderr)
 

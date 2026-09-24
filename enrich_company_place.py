@@ -30,6 +30,8 @@ def main():
                      help="recompute even for shards that already have company/place (e.g. after a fields.py fix)")
     args = ap.parse_args()
 
+    from concurrent.futures import ThreadPoolExecutor
+
     from huggingface_hub import CommitOperationAdd, HfApi
 
     api = HfApi(token=os.environ.get("HF_TOKEN"))
@@ -39,17 +41,26 @@ def main():
     )
     print(f"{len(shard_files)} shards on {REPO_ID}", file=sys.stderr)
 
-    # One commit for every changed shard, not one commit per shard -- HF
-    # rate-limits commits (128/hour) far below the shard count, which a
-    # per-file upload_file() loop blows through on any repo this size.
-    ops = []
-    for f in shard_files:
+    def process(f):
         df = pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}")
         if "company" in df.columns and "place" in df.columns and not args.force:
-            continue
+            return None
         company, place = zip(*df["text"].map(extract_company_place)) if len(df) else ((), ())
         df["company"] = company
         df["place"] = place
+        return f, df
+
+    # Reading each shard is a separate HTTP round-trip, network-bound not
+    # CPU-bound, so a thread pool helps despite the GIL. The commit itself
+    # stays a single batched call below either way.
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(process, shard_files))
+
+    ops = []
+    for result in results:
+        if result is None:
+            continue
+        f, df = result
         matched = df["company"].notna().sum()
         print(f"{f}: {matched}/{len(df)} matched", file=sys.stderr)
         if not args.dry_run:
