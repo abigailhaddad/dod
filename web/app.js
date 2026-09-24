@@ -12,16 +12,20 @@ const COLUMNS = [
   { label: 'Award', field: 'text', filterType: 'text', index: 2 },
 ];
 
-// Hidden, filter-only columns -- not rendered as <th>s, just along for the
-// ride in each row's data array so the aggregate panels below can group by
-// them without a second query.
+// Hidden, filter-only column -- not rendered as a <th>, just along for the
+// ride in each row's data array so the panels below can group by year
+// without a second query.
 const YEAR_INDEX = 4;
-const LINK_INDEX = 5;
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
+}
+
+function formatMonthYear(dateStr) {
+  if (!dateStr) return '';
+  return new Date(`${dateStr}T00:00:00`).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
 }
 
 // The stat cards and the two panels all describe "the rows currently on
@@ -34,28 +38,17 @@ function computeAggregates(table) {
   const rows = table.rows({ search: 'applied' }).data().toArray();
   const agencyCounts = new Map();
   const yearCounts = new Map();
-  const days = new Set();
-  let minDate = null;
-  let maxDate = null;
   for (const r of rows) {
-    const [date, agency, , , year, link] = r;
-    if (date) {
-      if (!minDate || date < minDate) minDate = date;
-      if (!maxDate || date > maxDate) maxDate = date;
-    }
+    const [, agency, , , year] = r;
     if (agency) agencyCounts.set(agency, (agencyCounts.get(agency) || 0) + 1);
     if (year) yearCounts.set(year, (yearCounts.get(year) || 0) + 1);
-    if (link) days.add(link);
   }
-  return { total: rows.length, agencyCounts, yearCounts, days, minDate, maxDate };
+  return { total: rows.length, agencyCounts, yearCounts };
 }
 
 function renderStats(agg) {
   document.getElementById('statTotal').textContent = agg.total.toLocaleString();
   document.getElementById('statAgencies').textContent = agg.agencyCounts.size;
-  document.getElementById('statDays').textContent = agg.days.size.toLocaleString();
-  document.getElementById('statDateRange').textContent =
-    agg.minDate && agg.maxDate ? `${agg.minDate} – ${agg.maxDate}` : '–';
 }
 
 function renderTopAgencies(agg) {
@@ -126,8 +119,21 @@ async function main() {
       ? `<a href="${escapeHtml(r.link)}" target="_blank" rel="noopener" title="${escapeHtml(r.article_title || '')}">Source &#8599;</a>`
       : '',
     r.year,
-    r.link || '',
   ]);
+
+  // The subtitle's date range describes the whole dataset, not whatever's
+  // filtered, so it's set once here from every row rather than recomputed
+  // alongside the aggregates below -- and computed from the data itself
+  // (not hardcoded) so it keeps saying the right thing as new days get
+  // scraped in.
+  const subtitleEl = document.getElementById('siteSubtitle');
+  const dates = rows.map((r) => r.date).filter(Boolean);
+  if (subtitleEl && dates.length) {
+    const minDate = dates.reduce((a, b) => (a < b ? a : b));
+    const maxDate = dates.reduce((a, b) => (a > b ? a : b));
+    subtitleEl.textContent =
+      `Every contract award scraped from war.gov's daily press releases, ${formatMonthYear(minDate)}–${formatMonthYear(maxDate)}`;
+  }
 
   const allColumns = [
     ...COLUMNS,
@@ -145,7 +151,6 @@ async function main() {
         { data: 2, className: 'award-text' },
         { data: 3, orderable: false },
         { data: 4, visible: false },
-        { data: 5, visible: false },
       ],
       order: [[0, 'desc']],
       pageLength: 25,
