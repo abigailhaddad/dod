@@ -3,8 +3,12 @@
 Scrapes war.gov's daily DoD contract-award announcements and publishes them to
 [`abigailhaddad/dod-daily-contracts`](https://huggingface.co/datasets/abigailhaddad/dod-daily-contracts)
 on HuggingFace. One row per contract award (not per day) -- `date`, `agency`,
-`text`, `link`, `article_title`, `row_index`. Covers the full archive,
-July 2014 through present.
+`company`, `place`, `text`, `link`, `article_title`, `row_index`. Covers the
+full archive, July 2014 through present.
+
+`company`/`place` are a best-effort extraction (see `fields.py`), not
+scraped fact -- ~95% match rate, `None` rather than a guess when not
+confidently found (dataset card has the details on when/why).
 
 war.gov 403s plain HTTP clients (Akamai), so `scrape.py` drives a real,
 non-headless Chrome via Playwright instead of requests/curl.
@@ -46,3 +50,37 @@ npx wrangler deploy         # redeploy after rebuilding
 dropdown (the raw column carries 12 years of hand-typed variants --
 "MISSLE", "DEFNSE", "LOGISITICS" -- collapsed to ~28 canonical labels); the
 published dataset itself is untouched.
+
+## company/place extraction
+
+`fields.py` holds the regex that splits each award paragraph's opening
+"Company, City, State, was awarded..." clause -- imported by
+`build_web_data.py` (site) and `enrich_company_place.py` (publishes it to
+the HF dataset itself). To add it to new shards after a normal scrape, or
+recompute everything after changing `fields.py`:
+
+```bash
+python3 enrich_company_place.py            # adds company/place to any shard missing them
+python3 enrich_company_place.py --force    # recompute for every shard (e.g. after a regex fix)
+python3 enrich_company_place.py --dry-run  # report match rates, push nothing
+```
+
+One commit for the whole run, not one per shard -- HF rate-limits commits
+(128/hour) well below the shard count.
+
+## Tests
+
+```bash
+pip install -r requirements-test.txt
+python3 build_web_data.py   # tests/test_company_consistency.py reads its output
+pytest tests/
+```
+
+`tests/test_fields.py` is unit tests for `extract_company_place` -- one per
+real edge case that broke it (small-business asterisks, "D.C." followed by
+punctuation, CORRECTION/UPDATE preambles, multi-awardee lists). 
+`tests/test_company_consistency.py` checks the extraction against the real
+dataset: a company-field search can never match more rows than a plain text
+search for the same term (company is derived from text), and shouldn't
+under-match by much for a company that rarely appears as a non-first name
+in a multi-awardee list (Palantir, Lockheed Martin, Boeing, ...).

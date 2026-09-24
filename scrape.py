@@ -391,18 +391,26 @@ one row per contract award (not per day).
 | column | |
 |---|---|
 | `date` | announcement date (ISO 8601), from the article URL |
-| `agency` | branch/agency header the award was listed under (`ARMY`, `NAVY`, `AIR FORCE`, `DEFENSE LOGISTICS AGENCY`, ...) |
+| `agency` | branch/agency header the award was listed under (`ARMY`, `NAVY`, `AIR FORCE`, `DEFENSE LOGISTICS AGENCY`, ...), as published -- typos and casing are the source's own, not normalized |
+| `company` | best-effort extraction of the awardee's name from the start of `text` (~95% match rate; `None` when not confidently found) |
+| `place` | best-effort "City, State" extraction paired with `company` (`None` under the same conditions) |
 | `text` | full free-text paragraph for that award, as published |
 | `link` | URL of the source article (one per day, not per award) |
 | `article_title` | title of the source article, e.g. "Contracts for July 7, 2026" |
 | `row_index` | position of this award within its article (0-based) |
 | `scraped_at` | UTC timestamp this row was scraped |
 
-Contractor name, dollar amount, contract number, etc. are inside `text` as
-free text, not parsed into their own columns. Covers the full archive,
-July 2014 through present -- a handful of individual days (fewer than ten,
-out of ~3,000) are missing where war.gov's own server errors on that
-article or has taken it down entirely.
+`company`/`place` are a derived convenience, not scraped fact: a regex
+anchored on US state names splits each paragraph's opening "Company, City,
+State, was awarded..." clause. They're `None` rather than a guess for
+multi-awardee paragraphs whose first-listed company is foreign, a small
+number of source-side formatting irregularities, and rows that are
+themselves a garbled fragment rather than a real award opening. Dollar
+amount, contract number, etc. are still only inside `text` as free text.
+
+Covers the full archive, July 2014 through present -- a handful of
+individual days (fewer than ten, out of ~3,000) are missing where war.gov's
+own server errors on that article or has taken it down entirely.
 
 U.S. government works are in the public domain. Not an official Department of
 War product.
