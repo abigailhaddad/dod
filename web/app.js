@@ -176,7 +176,12 @@ async function main() {
   });
 
   renderAggregates(table);
-  table.on('draw', () => renderAggregates(table));
+  // search.dt fires when the filtered row set actually changes; plain 'draw'
+  // also fires on pagination and page-length changes, where the row set is
+  // identical and this work is wasted -- verified via table.on('draw.dt', ...)
+  // vs table.on('search.dt', ...) counters: 3 "next page" clicks fired draw
+  // 3 times and search.dt 0 times.
+  table.on('search.dt', () => renderAggregates(table));
 
   document.getElementById('loadingBanner')?.remove();
 }
