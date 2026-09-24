@@ -177,9 +177,16 @@ async function main() {
 
   renderAggregates(table);
   table.on('draw', () => renderAggregates(table));
+
+  document.getElementById('loadingBanner')?.remove();
 }
 
 main().catch((err) => {
   console.error(err);
   showToast('Failed to load contracts', true);
+  const banner = document.getElementById('loadingBanner');
+  if (banner) {
+    banner.classList.add('error');
+    banner.innerHTML = '<span>Failed to load contract data. Try refreshing the page.</span>';
+  }
 });
