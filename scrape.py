@@ -33,6 +33,8 @@ import pandas as pd
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+from dedupe import is_repost, row_key
+
 load_dotenv()
 import os
 
@@ -186,6 +188,25 @@ def load_resume_state():
     if len(df) < SHARD_SIZE:
         return last_num, df[COLUMNS].to_dict("records")
     return last_num + 1, []
+
+
+RECENT_SHARDS = 3  # ~35 days of rows; a re-post lands within a day or two
+
+
+def load_recent_keys(buffer, shard_num):
+    """row_keys of recently published rows, to catch war.gov re-posting an
+    existing article under a new URL (see dedupe.py). `buffer` is the
+    in-progress shard; the rest comes from the last few full shards."""
+    keys = {row_key(r["text"]) for r in buffer}
+    for n in range(max(0, shard_num - RECENT_SHARDS), shard_num):
+        name = f"shard-{n:05d}.parquet"
+        local = DATA_DIR / name
+        try:
+            df = pd.read_parquet(local if local.exists() else f"hf://datasets/{REPO_ID}/data/{name}", columns=["text"])
+        except Exception:
+            continue
+        keys |= {row_key(t) for t in df["text"]}
+    return keys
 
 
 def get_listing(page, page_num):
@@ -463,6 +484,7 @@ def main():
     seen = load_seen()
     known_agencies = load_known_agencies()
     shard_num, buffer = load_resume_state()
+    recent_keys = load_recent_keys(buffer, shard_num)
     new_count = 0
 
     ensure_repo_and_card(args.dry_run)
@@ -505,7 +527,14 @@ def main():
                     print(f"[article] FAILED {a['href']}: {e}", file=sys.stderr)
                     continue
 
+                if is_repost(rows, recent_keys):
+                    print(f"[article] SKIP {a['href']}: {len(rows)} rows, mostly already published (re-post)", file=sys.stderr)
+                    seen.add(a["href"])
+                    save_seen(seen)
+                    continue
+
                 buffer.extend(rows)
+                recent_keys |= {row_key(r["text"]) for r in rows}
                 seen.add(a["href"])
                 new_count += 1
                 print(f"[article] {a['href']} -> {len(rows)} rows (buffer={len(buffer)})", file=sys.stderr)
