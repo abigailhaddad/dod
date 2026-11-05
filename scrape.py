@@ -42,7 +42,14 @@ import os
 
 BASE = "https://www.war.gov"
 LIST_URL = f"{BASE}/News/Contracts/"
-SHARD_SIZE = 500
+# Shards are read over HTTP, two round trips per file, so many small files make
+# the dataset slow to open (87 files of 500 rows took ~37 s in the browser
+# explorer). 20,000 rows is ~8 MB per file today, so the whole archive is three
+# files. At a few thousand rows a year, the next new file is years away.
+# The newest shard is re-uploaded on each run that adds rows, so it is
+# kept to a size that is cheap to re-send. scripts/compact_shards.py converts
+# an existing dataset with smaller shards to this size.
+SHARD_SIZE = 20_000
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -191,23 +198,44 @@ def load_resume_state():
     return last_num + 1, []
 
 
-RECENT_SHARDS = 3  # ~35 days of rows; a re-post lands within a day or two
+# war.gov re-posts an existing day under a new URL within a day or two (see
+# dedupe.py). A row counts as "recently published" if its article date is
+# within RECENT_DAYS of the newest article date we hold. The window is by
+# article date, not by shard, so it does not change with SHARD_SIZE.
+RECENT_DAYS = 45
+# The newest shard can be nearly empty right after a rollover, so also read
+# this many shards before it. At current volumes one earlier shard already
+# covers far more than RECENT_DAYS; the second is a margin.
+RECENT_PRIOR_SHARDS = 2
+
+
+def recent_row_keys(dated_texts, days=RECENT_DAYS):
+    """row_keys of rows whose article date is within `days` of the newest
+    article date among `dated_texts` ((date_iso_or_None, text) pairs). Rows
+    with no date are kept, so a parse gap can't shrink the window."""
+    pairs = list(dated_texts)
+    dates = [d for d, _ in pairs if d]
+    if not dates:
+        return {row_key(t) for _, t in pairs}
+    newest = date.fromisoformat(max(dates))
+    cutoff = (newest - timedelta(days=days)).isoformat()
+    return {row_key(t) for d, t in pairs if not d or d >= cutoff}
 
 
 def load_recent_keys(buffer, shard_num):
     """row_keys of recently published rows, to catch war.gov re-posting an
     existing article under a new URL (see dedupe.py). `buffer` is the
-    in-progress shard; the rest comes from the last few full shards."""
-    keys = {row_key(r["text"]) for r in buffer}
-    for n in range(max(0, shard_num - RECENT_SHARDS), shard_num):
+    in-progress shard; the rest comes from the shards just before it."""
+    pairs = [(r["date"], r["text"]) for r in buffer]
+    for n in range(max(0, shard_num - RECENT_PRIOR_SHARDS), shard_num):
         name = f"shard-{n:05d}.parquet"
         local = DATA_DIR / name
         try:
-            df = pd.read_parquet(local if local.exists() else f"hf://datasets/{REPO_ID}/data/{name}", columns=["text"])
+            df = pd.read_parquet(local if local.exists() else f"hf://datasets/{REPO_ID}/data/{name}", columns=["date", "text"])
         except Exception:
             continue
-        keys |= {row_key(t) for t in df["text"]}
-    return keys
+        pairs += list(zip(df["date"].where(df["date"].notna(), None), df["text"]))
+    return recent_row_keys(pairs)
 
 
 def get_listing(page, page_num):
