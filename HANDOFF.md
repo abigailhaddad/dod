@@ -32,14 +32,14 @@ Set these under repo Settings > Secrets and variables > Actions.
 | `HF_TOKEN` | Reading and writing the Hugging Face dataset. Needs write access to it. |
 | `CLOUDFLARE_API_TOKEN` | Deploying the website. |
 
-The Cloudflare account ID is not a secret here. It is typed into `daily.yml` as `CLOUDFLARE_ACCOUNT_ID`, and you need to replace it with yours.
+The Cloudflare account ID is not a secret. `daily.yml` reads it from a repository *variable* named `CLOUDFLARE_ACCOUNT_ID` (Settings > Secrets and variables > Actions > Variables tab). Add it with your own account ID before the first run, or the deploy step fails.
 
 ## Changing owners: everything to edit
 
 | File | What to change |
 |---|---|
 | `config.py` | `REPO_ID`, the Hugging Face dataset id. Every script reads it from here. Setting an `HF_DATASET_REPO` environment variable (or a line in `.env`) overrides it without editing code. |
-| `.github/workflows/daily.yml` | `CLOUDFLARE_ACCOUNT_ID`. |
+| Repo variable | Add `CLOUDFLARE_ACCOUNT_ID` with your Cloudflare account ID. No file edit needed. |
 | `wrangler.jsonc` | The Worker `name` and the custom domain in `routes` (`dod-daily-contracts.abigailhaddad.com`). The domain has to be on your Cloudflare account. |
 | `web/index.html` | The GitHub links on lines 36–37 and 93, the Hugging Face link on line 92, and the "Built by" credit on line 94. |
 | `web/site.css` | Nothing needed. Line 6 is a comment that mentions another site. |
@@ -59,7 +59,14 @@ War.gov sometimes re-posts an existing article under a new URL. `dedupe.py` catc
 
 ## What can go wrong
 
-**War.gov changes its page layout.** The scraper reads award paragraphs from the `div.body` element of each article. If that changes, each article fails with "no paragraphs found in div.body", is logged as `[article] FAILED`, and is skipped. From reading the code, the run then still finishes with "Done. 0 new articles scraped", so the Action can show green while adding nothing. Open the scrape step's log if the site's data looks stale. I haven't tested that failure.
+**War.gov changes its page layout, or stops posting.** The scraper reads award paragraphs from the `div.body` element of each article. If that changes, new articles fail with "no paragraphs found in div.body" and are logged as `[article] FAILED`. The run now ends with `[health] PROBLEM: ...` lines and exits non-zero, so the Action goes red and the build and deploy steps don't run. Whatever was scraped before the problem is already saved. The rule (in `health.py`) fails the run when:
+
+- the listing failed after 5 attempts, or the first listing page had no articles;
+- the newest listed article is more than 7 days old (outside the 2025 shutdown, announcements were never more than 6 days apart; during a long pause like that one, the job will go red every day until war.gov posts again);
+- the dates can't be read from the article links;
+- articles failed to parse and at least as many failed as succeeded. A single bad article among several good ones, or war.gov's own "currently unavailable" error, doesn't fail the run.
+
+A quiet day, where everything listed was already in the dataset, passes. I tested this logic with stubbed listings and articles, not against the live site.
 
 **War.gov blocks the scraper.** It returns 403 to plain HTTP clients, which is why the scraper drives a real, non-headless Chrome window through Playwright, and why the workflow installs Xvfb (a virtual display) and runs `xvfb-run`. If the block gets tighter, the listing step logs `[list] page 1 FAILED` five times and stops.
 
@@ -90,4 +97,4 @@ python3 build_web_data.py   # reads the dataset from Hugging Face; writes web/da
 pytest tests/
 ```
 
-`tests/test_company_consistency.py` compares the extraction against `web/data/contracts.parquet`, so rebuild that file first if it's old. The CI workflow doesn't run the tests, so a regex change in `fields.py` isn't checked automatically.
+`tests/test_company_consistency.py` compares the extraction against `web/data/contracts.parquet`, so rebuild that file first if it's old. The CI workflow runs `pytest tests/` before it scrapes. In CI, `test_company_consistency.py` skips itself, because `web/data/contracts.parquet` isn't built yet. Run it by hand after changing `fields.py`.
