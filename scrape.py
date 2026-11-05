@@ -33,6 +33,7 @@ import pandas as pd
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+from config import REPO_ID
 from dedupe import is_repost, row_key
 
 load_dotenv()
@@ -40,7 +41,6 @@ import os
 
 BASE = "https://www.war.gov"
 LIST_URL = f"{BASE}/News/Contracts/"
-REPO_ID = os.environ.get("HF_DATASET_REPO", "abigailhaddad/dod-daily-contracts")
 SHARD_SIZE = 500
 
 ROOT = Path(__file__).resolve().parent

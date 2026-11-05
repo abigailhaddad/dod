@@ -16,11 +16,10 @@ import sys
 import pandas as pd
 from dotenv import load_dotenv
 
+from config import REPO_ID
 from fields import extract_company_place
 
 load_dotenv()
-
-REPO_ID = os.environ.get("HF_DATASET_REPO", "abigailhaddad/dod-daily-contracts")
 
 
 def main():
