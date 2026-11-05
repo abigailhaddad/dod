@@ -35,7 +35,8 @@ python3 scrape.py --max-articles 5 --dry-run
 ```
 
 Resumable (`data/seen_articles.json`, `data/next_shard.txt`); pushes to HF in
-shards of 500 rows as it goes.
+shards of 20,000 rows as it goes (see HANDOFF.md for how the existing
+small shards get compacted into these).
 
 ## Website
 

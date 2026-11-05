@@ -51,11 +51,11 @@ The dataset card in `CARD_TEMPLATE` has no owner names in it, but check it for a
 
 ## How it keeps track of what it has seen
 
-GitHub's runner starts with an empty folder each day. When there's no local record, `scrape.py` reads the links already in the Hugging Face dataset and skips those articles. It then continues the newest shard until it holds 500 rows, and starts a new one after that. So the dataset is the source of truth. The local `data/` folder is for people running it on their own machine, and git ignores it.
+GitHub's runner starts with an empty folder each day. When there's no local record, `scrape.py` reads the links already in the Hugging Face dataset and skips those articles. It then continues the newest shard until it holds 20,000 rows (`SHARD_SIZE` in `scrape.py`), and starts a new one after that. So the dataset is the source of truth. The local `data/` folder is for people running it on their own machine, and git ignores it.
 
 Because each run looks back 10 days and skips what's already there, a missed day fixes itself within 10 days. For a longer gap, run it by hand with a bigger window, for example `python3 scrape.py --days-back 60`.
 
-War.gov sometimes re-posts an existing article under a new URL. `dedupe.py` catches those by comparing the text with recent rows, and the log says "SKIP ... (re-post)".
+War.gov sometimes re-posts an existing article under a new URL. `dedupe.py` catches those by comparing the text with recent rows, and the log says "SKIP ... (re-post)". "Recent" means rows whose article date is within 45 days of the newest article date we hold (`RECENT_DAYS` in `scrape.py`). It reads the newest shard and the two before it, so a shard rollover doesn't shrink the window.
 
 ## What can go wrong
 
@@ -72,7 +72,18 @@ A quiet day, where everything listed was already in the dataset, passes. I teste
 
 **Missing days.** Fewer than ten days out of about 3,000 are missing because war.gov's server errors on those articles or has removed them. Nothing to fix.
 
-**Hugging Face commit limits.** Hugging Face allows about 128 commits an hour. The scraper pushes one commit per shard, and `enrich_company_place.py` makes one commit per run. A full backfill can hit the limit. Wait an hour and re-run.
+**Hugging Face commit limits.** Hugging Face allows about 128 commits an hour. The scraper pushes one commit per shard it writes, and `enrich_company_place.py` makes one commit per run. With 20,000-row shards a normal run pushes one file, the newest shard, which is re-sent in full each day. A full backfill from scratch can still hit the limit. Wait an hour and re-run.
+
+**Shard size, and the one-time compaction.** Each shard file costs two web requests to read, so the dataset used to open slowly: it was 87 files of 500 rows. The code now writes 20,000-row shards. The live dataset keeps its 87 small files until you run `scripts/compact_shards.py` once. It rewrites them into 3 files (shard-00000 to shard-00002), checks that every row, column and type came through unchanged and in the same order, and then makes one Hugging Face commit that adds the 3 and deletes the 84 others. It's a dry run unless you pass `--upload`.
+
+Run it when the daily workflow isn't running (the schedule is 21:00 UTC), with `HF_TOKEN` set:
+
+```bash
+python3 scripts/compact_shards.py            # dry run: reads HF, writes ./compacted, verifies, uploads nothing
+python3 scripts/compact_shards.py --upload   # same, then one commit to the dataset
+```
+
+The commit is pinned to the version it read, so if something else pushes in the meantime it fails and changes nothing; run it again. Until the compaction has run, a scrape continues the old layout: it finds the newest small shard, fills it to 20,000 rows and then goes on from there, which makes one very uneven file. So run the compaction before, or soon after, you merge this. Anything that lists shards by name (`build_web_data.py`, `enrich_company_place.py`, and any outside page that hardcodes `data/shard-NNNNN.parquet` URLs) needs no change, but hardcoded URLs break once the 84 files are deleted.
 
 **Company and place are guesses.** They're extracted by a pattern match in `fields.py` and are left empty when it isn't confident. After changing `fields.py`, run `python3 enrich_company_place.py --force` to recompute every shard.
 

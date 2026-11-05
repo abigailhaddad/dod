@@ -102,8 +102,9 @@ def main():
         if f.startswith("data/shard-")
     )
     # One HTTP round-trip per shard, network-bound not CPU-bound, so a
-    # thread pool helps despite the GIL -- reading 86 shards sequentially
-    # took ~48s locally; this is the whole reason build_web_data.py is slow.
+    # thread pool helps despite the GIL -- reading the old 86 shards of 500
+    # rows sequentially took ~48s locally. With 20,000-row shards (see
+    # scripts/compact_shards.py) there are only a few files to read.
     with ThreadPoolExecutor(max_workers=16) as pool:
         dfs = list(pool.map(
             lambda f: pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}"), shard_files
