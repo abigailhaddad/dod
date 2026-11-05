@@ -13,6 +13,9 @@ confidently found (dataset card has the details on when/why).
 war.gov 403s plain HTTP clients (Akamai), so `scrape.py` drives a real,
 non-headless Chrome via Playwright instead of requests/curl.
 
+The code is MIT licensed (see `LICENSE`). The data are U.S. government works
+in the public domain.
+
 A handful of individual days (fewer than ten, out of ~3,000) are missing:
 war.gov's own server errors on those specific articles, or has taken them
 down entirely (404). Nothing to fix on this end.
@@ -76,7 +79,8 @@ python3 build_web_data.py   # tests/test_company_consistency.py reads its output
 pytest tests/
 ```
 
-`tests/test_fields.py` is unit tests for `extract_company_place` -- one per
+`tests/test_health.py` and `tests/test_scrape_exit.py` cover when a scrape run
+fails loudly (see `health.py`); they need no network. `tests/test_fields.py` is unit tests for `extract_company_place` -- one per
 real edge case that broke it (small-business asterisks, "D.C." followed by
 punctuation, CORRECTION/UPDATE preambles, multi-awardee lists). 
 `tests/test_company_consistency.py` checks the extraction against the real

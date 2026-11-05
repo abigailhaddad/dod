@@ -33,14 +33,15 @@ import pandas as pd
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
+from config import REPO_ID
 from dedupe import is_repost, row_key
+from health import RunStats, problems
 
 load_dotenv()
 import os
 
 BASE = "https://www.war.gov"
 LIST_URL = f"{BASE}/News/Contracts/"
-REPO_ID = os.environ.get("HF_DATASET_REPO", "abigailhaddad/dod-daily-contracts")
 SHARD_SIZE = 500
 
 ROOT = Path(__file__).resolve().parent
@@ -486,6 +487,7 @@ def main():
     shard_num, buffer = load_resume_state()
     recent_keys = load_recent_keys(buffer, shard_num)
     new_count = 0
+    stats = RunStats()
 
     ensure_repo_and_card(args.dry_run)
 
@@ -505,10 +507,15 @@ def main():
                     time.sleep(10)
             else:
                 print(f"[list] page {page_num}: giving up after 5 attempts, stopping", file=sys.stderr)
+                stats.listing_gave_up = True
                 break
             if not arts:
                 print(f"[list] page {page_num}: no items, stopping", file=sys.stderr)
                 break
+            if page_num == 1:
+                stats.page1_count = len(arts)
+                dates = [d for d in (parse_date_from_url(a["href"]) for a in arts) if d]
+                stats.newest_listed = max(dates) if dates else None
             print(f"[list] page {page_num}: {len(arts)} articles", file=sys.stderr)
 
             for a in arts:
@@ -523,20 +530,27 @@ def main():
                 polite_sleep()
                 try:
                     rows = scrape_article(page, a["href"], a["text"], known_agencies)
+                except ArticleUnavailable as e:
+                    print(f"[article] FAILED {a['href']}: {e}", file=sys.stderr)
+                    stats.unavailable += 1
+                    continue
                 except Exception as e:
                     print(f"[article] FAILED {a['href']}: {e}", file=sys.stderr)
+                    stats.parse_failures += 1
                     continue
 
                 if is_repost(rows, recent_keys):
                     print(f"[article] SKIP {a['href']}: {len(rows)} rows, mostly already published (re-post)", file=sys.stderr)
                     seen.add(a["href"])
                     save_seen(seen)
+                    stats.ok += 1
                     continue
 
                 buffer.extend(rows)
                 recent_keys |= {row_key(r["text"]) for r in rows}
                 seen.add(a["href"])
                 new_count += 1
+                stats.ok += 1
                 print(f"[article] {a['href']} -> {len(rows)} rows (buffer={len(buffer)})", file=sys.stderr)
                 save_seen(seen)  # cheap; keeps a crash from re-scraping already-seen articles
                 save_known_agencies(known_agencies)
@@ -561,6 +575,15 @@ def main():
         save_seen(seen)
 
     print(f"Done. {new_count} new articles scraped this run.", file=sys.stderr)
+
+    # Shards are already pushed above, so what did succeed is kept. Exit
+    # non-zero so the Action goes red and the later steps don't run on a
+    # run that looks wrong. A quiet day (everything already seen) is not a problem.
+    found = problems(stats)
+    if found:
+        for reason in found:
+            print(f"[health] PROBLEM: {reason}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from config import REPO_ID
 from fields import extract_company_place
 
-REPO_ID = "abigailhaddad/dod-daily-contracts"
 OUT_PATH = Path(__file__).resolve().parent / "web" / "data" / "contracts.parquet"
 
 # The raw `agency` column carries the source's own inconsistencies verbatim
