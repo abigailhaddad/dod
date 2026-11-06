@@ -43,6 +43,10 @@ _COMPANY_PLACE_RE = re.compile(
     r"(?P<city>[A-Z][A-Za-z.'\-]+(?:[ \-][A-Z][A-Za-z.'\-]+){0,4}),\s*"
     r"(?P<place>" + _PLACE_ALT + r")(?=[\s,.)]|$)"
 )
+# A leading tag on a corrected or updated announcement. war.gov writes it in capitals in older
+# articles and in title case ("Update:") in newer ones, so match either.
+_TAG_RE = re.compile(r"(CORRECTION|UPDATE|MODIFICATION):\s*", re.I)
+
 # Text that can only occur past the opening clause, in the contract's own
 # boilerplate -- if the lazy company match had to swallow this to find a
 # state name, it found the WRONG state name (usually the contracting
@@ -67,7 +71,7 @@ def extract_company_place(text):
     company in the wrong state) -- not something this function can or
     should second-guess.
 
-    A leading "CORRECTION:"/"UPDATE:" tag is stripped before the checks
+    A leading "CORRECTION:"/"UPDATE:"/"MODIFICATION:" tag (any case) is stripped before the checks
     below run, not treated as disqualifying on its own: about half of
     "UPDATE:" rows are a plain "UPDATE: Company, City, State" naming one
     added awardee, structurally identical to the base case once the tag is
@@ -82,7 +86,10 @@ def extract_company_place(text):
     m = _COMPANY_PLACE_RE.match(text)
     if not m:
         return None, None
-    company = re.sub(r"^(CORRECTION|UPDATE):\s*", "", m.group("company").strip())
+    company = m.group("company").strip()
+    tagged = _TAG_RE.match(company)
+    if tagged:
+        company = company[tagged.end():]
     if _RED_FLAGS_RE.search(company) or len(company) >= 79:
         return None, None
     return company, f"{m.group('city').strip()}, {m.group('place').strip()}"
