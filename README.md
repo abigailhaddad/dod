@@ -10,7 +10,7 @@ full archive, July 2014 through present.
 scraped fact -- ~95% match rate, `None` rather than a guess when not
 confidently found (dataset card has the details on when/why).
 
-war.gov 403s plain HTTP clients (Akamai), so `scrape.py` drives a real,
+war.gov 403s plain HTTP clients, so `scrape.py` drives a real,
 non-headless Chrome via Playwright instead of requests/curl.
 
 The code is MIT licensed (see `LICENSE`). The data are U.S. government works
@@ -35,8 +35,8 @@ python3 scrape.py --max-articles 5 --dry-run
 ```
 
 Resumable (`data/seen_articles.json`, `data/next_shard.txt`); pushes to HF in
-shards of 20,000 rows as it goes (see HANDOFF.md for how the existing
-small shards get compacted into these).
+shards of 20,000 rows as it goes. `scripts/compact_shards.py` merges small shards
+if the dataset ever fragments again.
 
 ## Website
 
@@ -69,8 +69,7 @@ python3 enrich_company_place.py --force    # recompute for every shard (e.g. aft
 python3 enrich_company_place.py --dry-run  # report match rates, push nothing
 ```
 
-One commit for the whole run, not one per shard -- HF rate-limits commits
-(128/hour) well below the shard count.
+One commit for the whole run, not one per shard.
 
 ## Tests
 
