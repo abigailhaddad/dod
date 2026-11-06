@@ -91,3 +91,16 @@ def test_no_match_returns_none():
 def test_empty_and_none_input():
     assert extract_company_place("") == (None, None)
     assert extract_company_place(None) == (None, None)
+
+
+def test_tag_is_stripped_in_any_case():
+    # war.gov writes "UPDATE:" in capitals in older articles and "Update:" in newer ones.
+    for tag in ("UPDATE: ", "Update: ", "update: ", "CORRECTION: ", "Correction: ", "MODIFICATION: "):
+        text = tag + "Zyris Inc.,* Goleta, California (SPE2DF-27-D-0002, $15,000,000), has been added as an awardee"
+        assert extract_company_place(text) == ("Zyris Inc.", "Goleta, California"), tag
+
+
+def test_tag_is_only_stripped_at_the_start():
+    text = "Zyris Update: Inc., Goleta, California (SPE2DF-27-D-0002), has been added as an awardee"
+    company, place = extract_company_place(text)
+    assert company == "Zyris Update: Inc." and place == "Goleta, California"
