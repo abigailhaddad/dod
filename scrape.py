@@ -142,6 +142,12 @@ def _hf_shard_files():
             if f.startswith("data/shard-")
         )
     except RepositoryNotFoundError:
+        # HF answers 401 (missing/bad token) with RepositoryNotFoundError too.
+        # Only call it a first run if we hold a token that whoami accepts;
+        # otherwise raise rather than return [] (see below).
+        if not os.environ.get("HF_TOKEN"):
+            raise
+        api.whoami()  # raises HfHubHTTPError on an invalid/expired token
         # First run: the repo is created later by ensure_repo_and_card().
         # Any other error (429, 5xx, network) must propagate: returning []
         # makes load_resume_state() start at shard 0 and push_shard() would
