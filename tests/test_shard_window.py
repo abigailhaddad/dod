@@ -108,3 +108,20 @@ def test_resume_starts_a_new_shard_when_the_newest_is_full(data_dir, monkeypatch
     monkeypatch.setattr(scrape, "SHARD_SIZE", 5)
     shard(data_dir / "shard-00000.parquet", [("2026-01-01", f"a{i}") for i in range(5)])
     assert scrape.load_resume_state() == (1, [])
+
+
+def test_hf_listing_error_is_not_treated_as_empty_repo(monkeypatch):
+    """A transient Hub error must not look like 'no shards yet': that would
+    restart at shard 0 and overwrite data/shard-00000.parquet."""
+    import huggingface_hub
+
+    class Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        def list_repo_files(self, *a, **k):
+            raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", Boom)
+    with pytest.raises(RuntimeError):
+        scrape._hf_shard_files()

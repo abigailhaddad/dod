@@ -133,13 +133,19 @@ def parse_date_from_url(url):
 def _hf_shard_files():
     from huggingface_hub import HfApi
 
+    from huggingface_hub.errors import RepositoryNotFoundError
+
     api = HfApi(token=os.environ.get("HF_TOKEN"))
     try:
         return sorted(
             f for f in api.list_repo_files(REPO_ID, repo_type="dataset")
             if f.startswith("data/shard-")
         )
-    except Exception:
+    except RepositoryNotFoundError:
+        # First run: the repo is created later by ensure_repo_and_card().
+        # Any other error (429, 5xx, network) must propagate: returning []
+        # makes load_resume_state() start at shard 0 and push_shard() would
+        # then overwrite data/shard-00000.parquet on the Hub.
         return []
 
 
@@ -161,10 +167,9 @@ def load_seen():
         from concurrent.futures import ThreadPoolExecutor
 
         def read_links(f):
-            try:
-                return set(pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}", columns=["link"])["link"].unique())
-            except Exception:
-                return set()
+            # No try/except: a shard we failed to read would leave its links
+            # out of `seen` and the articles would be re-scraped and duplicated.
+            return set(pd.read_parquet(f"hf://datasets/{REPO_ID}/{f}", columns=["link"])["link"].unique())
 
         with ThreadPoolExecutor(max_workers=16) as pool:
             for s in pool.map(read_links, _hf_shard_files()):
