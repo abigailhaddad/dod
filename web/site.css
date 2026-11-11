@@ -157,14 +157,37 @@ a:hover { text-decoration-color: var(--color-accent); }
     min-height: 2px;
 }
 .year-bar-label {
-    font-size: 0.7rem;
+    font-size: 0.75rem;
     color: var(--color-text-muted);
     margin-top: 2px;
 }
 
 @media (max-width: 700px) {
-    .panels-row { grid-template-columns: 1fr; }
+    .panels-row { grid-template-columns: minmax(0, 1fr); }
+    h1 { font-size: 1.875rem; }
+    .stat-card { padding: 1rem; }
+    .toolbar-row { flex-wrap: wrap; }
+    /* Without a minimum width the Award column was squeezed to a few
+       characters on a phone, so each row ran to hundreds of pixels tall
+       (the page was ~36,000px). The table scrolls inside its wrapper. */
+    #contractsTable td.award-text { min-width: 300px; }
 }
+
+/* Table headers: shared.css sets 11px, under the 12px floor. */
+.table thead th { font-size: 12px; }
+.outcome-list li { gap: 1rem; }
+.outcome-count { white-space: nowrap; }
+
+/* Toolbar buttons: Bootstrap's default grey did not match the site palette. */
+.toolbar-row .btn { font-size: 0.875rem; padding: 0.4rem 0.75rem; }
+.toolbar-row .btn-secondary {
+    background: var(--color-accent); border-color: var(--color-accent); color: #fff;
+}
+.toolbar-row .btn-secondary:hover { background: #245a42; border-color: #245a42; }
+.toolbar-row .btn-outline-secondary {
+    color: var(--color-accent); border-color: var(--color-accent); background: transparent;
+}
+.toolbar-row .btn-outline-secondary:hover { background: var(--color-accent); color: #fff; }
 
 /* Column-specific filters (the "+ Add Filter" bar) do the searching here;
    the generic DataTables global search box is redundant with it. Same call
