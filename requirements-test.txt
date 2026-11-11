@@ -1,1 +1,3 @@
 pytest
+# tests/test_shard_window.py builds a fake huggingface_hub 404 with an httpx.Response
+httpx
